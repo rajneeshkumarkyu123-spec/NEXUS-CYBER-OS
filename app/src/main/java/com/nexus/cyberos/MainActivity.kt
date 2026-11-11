@@ -1,7 +1,8 @@
- package com.nexus.cyberos
+package com.nexus.cyberos
 
 import android.Manifest
 import android.app.ActivityManager
+import android.app.KeyguardManager
 import android.app.role.RoleManager
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -62,10 +63,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -78,8 +82,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -100,6 +107,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -137,11 +147,20 @@ val FONTS: List<Pair<String, FontFamily>> by lazy {
     )
 }
 
+val ICON_SIZES = listOf(36, 42, 50)
+
 // ---------- settings ----------
 object Cfg {
     private lateinit var sp: SharedPreferences
     var accent by mutableStateOf(0)
     var font by mutableStateOf(0)
+    var bg by mutableStateOf(0)
+    var iconShape by mutableStateOf(0)
+    var iconSize by mutableStateOf(1)
+    var iconTint by mutableStateOf(0)
+    var labels by mutableStateOf(true)
+    var hideBar by mutableStateOf(true)
+    var overLock by mutableStateOf(false)
     var radarOn by mutableStateOf(true)
     var dtLock by mutableStateOf(true)
     var dtUnlock by mutableStateOf(true)
@@ -159,6 +178,13 @@ object Cfg {
         sp = c.getSharedPreferences("nexus2", Context.MODE_PRIVATE)
         accent = sp.getInt("accent", 0).coerceIn(0, THEMES.size - 1)
         font = sp.getInt("font", 0).coerceIn(0, FONTS.size - 1)
+        bg = sp.getInt("bg", 0).coerceIn(0, 2)
+        iconShape = sp.getInt("iconShape", 0).coerceIn(0, 2)
+        iconSize = sp.getInt("iconSize", 1).coerceIn(0, 2)
+        iconTint = sp.getInt("iconTint", 0).coerceIn(0, 1)
+        labels = sp.getBoolean("labels", true)
+        hideBar = sp.getBoolean("hideBar", true)
+        overLock = sp.getBoolean("overLock", false)
         radarOn = sp.getBoolean("radarOn", true)
         dtLock = sp.getBoolean("dtLock", true)
         dtUnlock = sp.getBoolean("dtUnlock", true)
@@ -170,7 +196,9 @@ object Cfg {
 
     fun save() {
         sp.edit()
-            .putInt("accent", accent).putInt("font", font)
+            .putInt("accent", accent).putInt("font", font).putInt("bg", bg)
+            .putInt("iconShape", iconShape).putInt("iconSize", iconSize).putInt("iconTint", iconTint)
+            .putBoolean("labels", labels).putBoolean("hideBar", hideBar).putBoolean("overLock", overLock)
             .putBoolean("radarOn", radarOn).putBoolean("dtLock", dtLock)
             .putBoolean("dtUnlock", dtUnlock).putBoolean("askedHome", askedHome)
             .putString("passcode", passcode)
@@ -188,6 +216,10 @@ val FF: FontFamily get() = FONTS[Cfg.font].second
 var screenState by mutableStateOf("lock")
 var panelOpen by mutableStateOf(false)
 var torch by mutableStateOf(false)
+var setPage by mutableStateOf("main")
+var winApply: () -> Unit = {}
+
+fun openSettings() { setPage = "main"; screenState = "settings"; panelOpen = false }
 
 // ---------- sound ----------
 object Snd {
@@ -214,11 +246,35 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    fun applyWindow() {
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(Cfg.overLock)
+            setTurnScreenOn(Cfg.overLock)
+        } else {
+            val f = WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            if (Cfg.overLock) window.addFlags(f) else window.clearFlags(f)
+        }
+        val ic = WindowCompat.getInsetsController(window, window.decorView)
+        if (Cfg.hideBar) {
+            ic.hide(WindowInsetsCompat.Type.statusBars())
+            ic.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else {
+            ic.show(WindowInsetsCompat.Type.statusBars())
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Cfg.init(this)
+        winApply = { applyWindow() }
+        applyWindow()
         ContextCompat.registerReceiver(this, off, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
         setContent { NexusApp() }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyWindow()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -248,8 +304,7 @@ fun loadApps(c: Context): List<AppInfo> {
 }
 
 fun autoFill(apps: List<AppInfo>) {
-    if (!Cfg.dock.all { it.isBlank() } || !Cfg.side.any { it.isBlank() }) return
-    if (!Cfg.side.all { it.isBlank() }) return
+    if (!Cfg.dock.all { it.isBlank() } || !Cfg.side.all { it.isBlank() }) return
     val pref = listOf(
         "com.google.android.dialer", "com.android.dialer", "com.whatsapp", "com.android.chrome",
         "com.google.android.youtube", "com.instagram.android", "com.google.android.apps.maps",
@@ -269,6 +324,19 @@ fun requestHomeRole(c: Context, l: ActivityResultLauncher<Intent>) {
         if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_HOME) && !rm.isRoleHeld(RoleManager.ROLE_HOME)) {
             l.launch(rm.createRequestRoleIntent(RoleManager.ROLE_HOME))
         }
+    }
+}
+
+fun proceedUnlock(act: ComponentActivity) {
+    val km = act.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+    if (km.isKeyguardLocked) {
+        km.requestDismissKeyguard(act, object : KeyguardManager.KeyguardDismissCallback() {
+            override fun onDismissSucceeded() { screenState = "home" }
+            override fun onDismissError() { Snd.err() }
+            override fun onDismissCancelled() { Snd.err() }
+        })
+    } else {
+        screenState = "home"
     }
 }
 
@@ -335,6 +403,48 @@ fun Tile(t: String, m: Modifier = Modifier, pad: Int = 22, sz: Int = 16, on: () 
             .padding(vertical = pad.dp),
         contentAlignment = Alignment.Center
     ) { Mono(t, G, sz) }
+}
+
+@Composable
+fun Toggle(label: String, on: Boolean, f: () -> Unit) {
+    Mono(if (on) "[x] $label" else "[ ] $label", G, 15, Modifier.fillMaxWidth().tap(f).padding(vertical = 10.dp))
+}
+
+// ---------- backgrounds ----------
+val CODE = listOf(
+    "> compiling :app:compileDebugKotlin ...", "[ OK ] kotlinc 2.0.20 loaded", "import android.net.wifi.WifiManager",
+    "fun scan(c: Context) {", "    val wm = c.getSystemService(WIFI_SERVICE)", "    wm.startScan()", "}",
+    "[ OK ] dex merge complete", "> :app:mergeDebugResources UP-TO-DATE", "val key = sha256(input)",
+    "while (true) { delay(1000) }", "[WARN] unreachable code", "  at kernel.sched.run(sched.c:204)",
+    "0x7ffc1a2b : 48 89 e5 48 83 ec 10", "BUILD SUCCESSFUL in 8s", "\$ gradle assembleDebug --stacktrace",
+    "class NexusOS : Launcher() {", "    override fun onHome() = lock()", "}", "[ OK ] proxy tor:9050 up",
+    "ssh root@10.0.0.1 -p 22", "ld: linking libnexus.so", "if (access == GRANTED) open(vault)",
+    "Task :app:packageDebug", "[ OK ] signing apk ...", "git push origin main", "ERROR: segfault (ignored)",
+    "nmap -sS 192.168.1.0/24"
+)
+
+@Composable
+fun CodeBg() {
+    val t by rememberInfiniteTransition(label = "code").animateFloat(
+        0f, 1f, infiniteRepeatable(tween(60000, easing = LinearEasing)), label = "t"
+    )
+    Canvas(Modifier.fillMaxSize()) {
+        val lh = 34f
+        val n = (size.height / lh).toInt() + 2
+        val paint = android.graphics.Paint()
+        paint.textSize = 24f
+        paint.typeface = Typeface.MONOSPACE
+        val off = t * lh * (CODE.size * 7)
+        val base = (off / lh).toInt()
+        val shift = off % lh
+        for (i in 0 until n) {
+            val line = CODE[(base + i) % CODE.size]
+            val y = i * lh - shift
+            paint.color = G.toArgb()
+            paint.alpha = if (line.startsWith("[ OK ]") || line.startsWith("BUILD")) 130 else 70
+            drawContext.canvas.nativeCanvas.drawText(line, 12f, y, paint)
+        }
+    }
 }
 
 @Composable
@@ -439,11 +549,18 @@ fun NexusApp() {
     BackHandler(true) {
         when {
             panelOpen -> panelOpen = false
+            s == "settings" && setPage != "main" -> setPage = "main"
             s != "home" && s != "lock" && s != "aod" -> screenState = "home"
         }
     }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        if (s != "aod") MatrixRain()
+        if (s != "aod") {
+            when (Cfg.bg) {
+                0 -> CodeBg()
+                1 -> MatrixRain()
+                else -> {}
+            }
+        }
         Column(Modifier.fillMaxSize()) {
             if (s != "lock" && s != "aod") StatusBar()
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -466,6 +583,7 @@ fun NexusApp() {
 // ---------- lock screen ----------
 @Composable
 fun LockScreen() {
+    val act = LocalContext.current as ComponentActivity
     var now by remember { mutableStateOf(Date()) }
     LaunchedEffect(Unit) { while (true) { now = Date(); delay(1000) } }
     var pin by remember { mutableStateOf("") }
@@ -485,7 +603,8 @@ fun LockScreen() {
         scope.launch {
             for (l in steps) { log.add("[*] $l"); Snd.click(); delay(350) }
             Snd.ok(); delay(300)
-            pin = ""; busy = false; screenState = "home"
+            pin = ""; busy = false
+            proceedUnlock(act)
         }
     }
 
@@ -496,7 +615,7 @@ fun LockScreen() {
             Modifier.pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { Snd.click(); screenState = "aod" },
-                    onDoubleTap = { if (Cfg.dtUnlock) { Snd.ok(); screenState = "home" } else Snd.err() }
+                    onDoubleTap = { if (Cfg.dtUnlock) { Snd.ok(); proceedUnlock(act) } else Snd.err() }
                 )
             },
             horizontalAlignment = Alignment.CenterHorizontally
@@ -568,6 +687,12 @@ fun AppCell(a: AppInfo) {
     val icon = remember(a.pkg) {
         runCatching { c.packageManager.getApplicationIcon(a.pkg).toBitmap(96, 96).asImageBitmap() }.getOrNull()
     }
+    val sz = ICON_SIZES[Cfg.iconSize].dp
+    val shape = when (Cfg.iconShape) {
+        0 -> RoundedCornerShape(10.dp)
+        1 -> CircleShape
+        else -> RoundedCornerShape(0.dp)
+    }
     Column(
         Modifier.padding(2.dp)
             .tap { c.packageManager.getLaunchIntentForPackage(a.pkg)?.let { c.startActivity(it) } }
@@ -575,14 +700,22 @@ fun AppCell(a: AppInfo) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         if (icon != null) {
-            Image(icon, null, Modifier.size(42.dp).border(1.dp, DG, RoundedCornerShape(10.dp)).padding(2.dp))
+            Image(
+                icon, null,
+                Modifier.size(sz).clip(shape).border(1.dp, DG, shape),
+                colorFilter = if (Cfg.iconTint == 1) ColorFilter.tint(G, BlendMode.Modulate) else null
+            )
         } else {
-            Box(Modifier.size(42.dp).border(1.dp, G), contentAlignment = Alignment.Center) { Mono(a.label.take(1), G, 20) }
+            Box(Modifier.size(sz).clip(shape).border(1.dp, G, shape), contentAlignment = Alignment.Center) {
+                Mono(a.label.take(1), G, 20)
+            }
         }
-        Text(
-            a.label, color = G, fontFamily = FF, fontSize = 9.sp,
-            maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center
-        )
+        if (Cfg.labels) {
+            Text(
+                a.label, color = G, fontFamily = FF, fontSize = 9.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center
+            )
+        }
     }
 }
 
@@ -590,9 +723,10 @@ fun AppCell(a: AppInfo) {
 fun Slot(pkg: String, map: Map<String, AppInfo>, m: Modifier = Modifier) {
     val a = map[pkg]
     if (a == null) {
-        Box(m.padding(4.dp).size(42.dp).border(1.dp, DG).tap { screenState = "settings" }, contentAlignment = Alignment.Center) {
-            Mono("+", DG, 20)
-        }
+        Box(
+            m.padding(4.dp).size(ICON_SIZES[Cfg.iconSize].dp).border(1.dp, DG).tap { openSettings() },
+            contentAlignment = Alignment.Center
+        ) { Mono("+", DG, 20) }
     } else {
         Box(m, contentAlignment = Alignment.Center) { AppCell(a) }
     }
@@ -667,7 +801,7 @@ fun Home() {
                 Spacer(Modifier.height(8.dp))
                 Tile("ALL APPS", Modifier.width(120.dp), 10, 12) { screenState = "drawer" }
                 Spacer(Modifier.height(6.dp))
-                Tile("SETTINGS", Modifier.width(120.dp), 10, 12) { screenState = "settings" }
+                Tile("SETTINGS", Modifier.width(120.dp), 10, 12) { openSettings() }
             }
         }
         Row(
@@ -726,7 +860,7 @@ fun ControlPanel() {
         "RADAR" to { panelOpen = false; screenState = "wifi" },
         "SYSTEM" to { panelOpen = false; screenState = "sys" },
         "TERMINAL" to { panelOpen = false; screenState = "term" },
-        "LAUNCHER SETTINGS" to { panelOpen = false; screenState = "settings" },
+        "LAUNCHER SETTINGS" to { openSettings() },
         "HOME" to { panelOpen = false; screenState = "home" },
         "CLOSE" to { panelOpen = false }
     )
@@ -753,20 +887,128 @@ fun ControlPanel() {
     }
 }
 
-// ---------- settings ----------
+// ---------- settings (folders) ----------
+@Composable
+fun PageFrame(title: String, body: @Composable () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(14.dp).verticalScroll(rememberScrollState())) {
+        Mono("> $title", G, 18)
+        Spacer(Modifier.height(10.dp))
+        Tile("BACK", Modifier.fillMaxWidth(), 12, 13) { setPage = "main" }
+        Spacer(Modifier.height(12.dp))
+        body()
+        Spacer(Modifier.height(40.dp))
+    }
+}
+
 @Composable
 fun SettingsScreen() {
+    when (setPage) {
+        "colors" -> PageColors()
+        "fonts" -> PageFonts()
+        "icons" -> PageIcons()
+        "bg" -> PageBg()
+        "slots" -> PageSlots()
+        "lock" -> PageLock()
+        "launcher" -> PageLauncher()
+        else -> SettingsMain()
+    }
+}
+
+@Composable
+fun SettingsMain() {
+    val items = listOf(
+        "colors" to "[+] COLORS (20 naam ke saath)",
+        "fonts" to "[+] FONTS (20)",
+        "icons" to "[+] APP ICONS (shape / size / tint)",
+        "bg" to "[+] BACKGROUND (compiler / matrix)",
+        "slots" to "[+] HOME APPS (dock + side)",
+        "lock" to "[+] LOCK SCREEN & PASSCODE",
+        "launcher" to "[+] LAUNCHER (default home, status bar)"
+    )
+    Column(Modifier.fillMaxSize().padding(14.dp).verticalScroll(rememberScrollState())) {
+        Mono("> SETTINGS", G, 18)
+        Spacer(Modifier.height(10.dp))
+        Tile("BACK TO HOME", Modifier.fillMaxWidth(), 12, 13) { screenState = "home" }
+        Spacer(Modifier.height(12.dp))
+        items.forEach { (k, n) ->
+            Tile(n, Modifier.fillMaxWidth(), 16, 14) { setPage = k }
+            Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(30.dp))
+    }
+}
+
+@Composable
+fun PageColors() = PageFrame("COLORS") {
+    THEMES.forEachIndexed { i, th ->
+        val col = Color(th.second)
+        Row(
+            Modifier.fillMaxWidth().tap { Cfg.accent = i; Cfg.save() }.padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(24.dp).background(col))
+            Spacer(Modifier.width(12.dp))
+            Mono((if (Cfg.accent == i) "> " else "  ") + th.first, col, 16)
+        }
+    }
+}
+
+@Composable
+fun PageFonts() = PageFrame("FONTS") {
+    FONTS.forEachIndexed { i, f ->
+        Text(
+            (if (Cfg.font == i) "> " else "  ") + f.first + "  Abc 123",
+            color = G, fontFamily = f.second, fontSize = 17.sp,
+            modifier = Modifier.fillMaxWidth().tap { Cfg.font = i; Cfg.save() }.padding(vertical = 10.dp)
+        )
+    }
+}
+
+@Composable
+fun PageIcons() = PageFrame("APP ICONS") {
+    Mono("SHAPE", DG, 12)
+    Spacer(Modifier.height(6.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf("ROUND", "CIRCLE", "SQUARE").forEachIndexed { i, n ->
+            Tile(if (Cfg.iconShape == i) "[$n]" else n, Modifier.weight(1f), 10, 11) { Cfg.iconShape = i; Cfg.save() }
+        }
+    }
+    Spacer(Modifier.height(14.dp))
+    Mono("SIZE", DG, 12)
+    Spacer(Modifier.height(6.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf("SMALL", "MEDIUM", "LARGE").forEachIndexed { i, n ->
+            Tile(if (Cfg.iconSize == i) "[$n]" else n, Modifier.weight(1f), 10, 11) { Cfg.iconSize = i; Cfg.save() }
+        }
+    }
+    Spacer(Modifier.height(14.dp))
+    Mono("COLOR", DG, 12)
+    Spacer(Modifier.height(6.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf("ORIGINAL", "HACKER TINT").forEachIndexed { i, n ->
+            Tile(if (Cfg.iconTint == i) "[$n]" else n, Modifier.weight(1f), 10, 11) { Cfg.iconTint = i; Cfg.save() }
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+    Toggle("App ke naam (label) dikhao", Cfg.labels) { Cfg.labels = !Cfg.labels; Cfg.save() }
+}
+
+@Composable
+fun PageBg() = PageFrame("BACKGROUND") {
+    listOf("COMPILER CODE (scrolling)", "MATRIX RAIN", "PLAIN BLACK").forEachIndexed { i, n ->
+        Tile(if (Cfg.bg == i) "[x] $n" else n, Modifier.fillMaxWidth(), 16, 13) { Cfg.bg = i; Cfg.save() }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+fun PageSlots() {
     val c = LocalContext.current
     val apps = remember { loadApps(c) }
-    val roleL = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
-    var newPin by remember { mutableStateOf("") }
     var pick by remember { mutableStateOf<Pair<Boolean, Int>?>(null) }
     val p = pick
-
     if (p != null) {
-        Column(Modifier.fillMaxSize().padding(14.dp)) {
-            Mono("> SLOT KE LIYE APP CHUNO", G, 16)
-            Spacer(Modifier.height(8.dp))
+        PageFrame("APP CHUNO") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Tile("CLEAR", Modifier.weight(1f), 10, 13) {
                     if (p.first) Cfg.dock[p.second] = "" else Cfg.side[p.second] = ""
@@ -774,101 +1016,78 @@ fun SettingsScreen() {
                 }
                 Tile("CANCEL", Modifier.weight(1f), 10, 13) { pick = null }
             }
-            LazyColumn(Modifier.weight(1f)) {
-                items(apps) { a ->
-                    Mono(
-                        a.label, G, 16,
-                        Modifier.fillMaxWidth().tap {
-                            if (p.first) Cfg.dock[p.second] = a.pkg else Cfg.side[p.second] = a.pkg
-                            Cfg.save(); pick = null
-                        }.padding(vertical = 10.dp)
-                    )
-                }
+            Spacer(Modifier.height(8.dp))
+            apps.forEach { a ->
+                Mono(
+                    a.label, G, 16,
+                    Modifier.fillMaxWidth().tap {
+                        if (p.first) Cfg.dock[p.second] = a.pkg else Cfg.side[p.second] = a.pkg
+                        Cfg.save(); pick = null
+                    }.padding(vertical = 10.dp)
+                )
             }
         }
-        return
+    } else {
+        PageFrame("HOME APPS") {
+            Mono("DOCK (neeche ke 4 apps) - tap karke badlo", DG, 12)
+            for (i in 0 until 4) {
+                val lab = apps.find { it.pkg == Cfg.dock[i] }?.label ?: "(khaali)"
+                Mono("${i + 1}. $lab", G, 15, Modifier.fillMaxWidth().tap { pick = true to i }.padding(vertical = 8.dp))
+            }
+            Spacer(Modifier.height(12.dp))
+            Mono("LEFT SIDE (5 apps) - tap karke badlo", DG, 12)
+            for (i in 0 until 5) {
+                val lab = apps.find { it.pkg == Cfg.side[i] }?.label ?: "(khaali)"
+                Mono("${i + 1}. $lab", G, 15, Modifier.fillMaxWidth().tap { pick = false to i }.padding(vertical = 8.dp))
+            }
+        }
     }
+}
 
-    LazyColumn(Modifier.fillMaxSize().padding(14.dp)) {
-        item {
-            Column {
-                Mono("> SETTINGS", G, 18)
-                Spacer(Modifier.height(10.dp))
-                Tile("BACK TO HOME", Modifier.fillMaxWidth(), 12, 13) { screenState = "home" }
-                Spacer(Modifier.height(8.dp))
-                Tile("SET AS DEFAULT HOME APP", Modifier.fillMaxWidth(), 12, 13) { requestHomeRole(c, roleL) }
-                Spacer(Modifier.height(8.dp))
-                Tile("HOME APP SETTINGS (phone)", Modifier.fillMaxWidth(), 12, 13) {
-                    runCatching { c.startActivity(Intent(Settings.ACTION_HOME_SETTINGS)) }
-                }
-                Spacer(Modifier.height(14.dp))
-                Mono(
-                    if (Cfg.radarOn) "[x] Radar home par dikhao" else "[ ] Radar home par dikhao", G, 15,
-                    Modifier.fillMaxWidth().tap { Cfg.radarOn = !Cfg.radarOn; Cfg.save() }.padding(vertical = 8.dp)
-                )
-                Mono(
-                    if (Cfg.dtLock) "[x] Home par double tap = lock" else "[ ] Home par double tap = lock", G, 15,
-                    Modifier.fillMaxWidth().tap { Cfg.dtLock = !Cfg.dtLock; Cfg.save() }.padding(vertical = 8.dp)
-                )
-                Mono(
-                    if (Cfg.dtUnlock) "[x] Lock par double tap = unlock (bina passcode)" else "[ ] Lock par double tap = unlock (bina passcode)", G, 15,
-                    Modifier.fillMaxWidth().tap { Cfg.dtUnlock = !Cfg.dtUnlock; Cfg.save() }.padding(vertical = 8.dp)
-                )
-                Spacer(Modifier.height(14.dp))
-                Mono("DOCK (neeche ke 4 apps) - tap karke badlo", DG, 12)
-                for (i in 0 until 4) {
-                    val lab = apps.find { it.pkg == Cfg.dock[i] }?.label ?: "(khaali)"
-                    Mono("${i + 1}. $lab", G, 15, Modifier.fillMaxWidth().tap { pick = true to i }.padding(vertical = 8.dp))
-                }
-                Spacer(Modifier.height(10.dp))
-                Mono("LEFT SIDE (5 apps) - tap karke badlo", DG, 12)
-                for (i in 0 until 5) {
-                    val lab = apps.find { it.pkg == Cfg.side[i] }?.label ?: "(khaali)"
-                    Mono("${i + 1}. $lab", G, 15, Modifier.fillMaxWidth().tap { pick = false to i }.padding(vertical = 8.dp))
-                }
-                Spacer(Modifier.height(14.dp))
-                Mono("NAYA PASSCODE (min 3 akshar)", DG, 12)
-                Spacer(Modifier.height(6.dp))
-                BasicTextField(
-                    value = newPin, onValueChange = { newPin = it }, singleLine = true,
-                    textStyle = TextStyle(color = G, fontFamily = FF, fontSize = 18.sp),
-                    cursorBrush = SolidColor(G),
-                    modifier = Modifier.fillMaxWidth().border(1.dp, DG).padding(10.dp)
-                )
-                Spacer(Modifier.height(8.dp))
-                Tile("SAVE PASSCODE", Modifier.fillMaxWidth(), 12, 13) {
-                    if (newPin.length >= 3) { Cfg.passcode = newPin; Cfg.save(); newPin = "" }
-                }
-                Spacer(Modifier.height(14.dp))
-                Mono("THEME COLOR (20)", DG, 12)
-            }
-        }
-        items(THEMES.size) { i ->
-            val col = Color(THEMES[i].second)
-            Row(
-                Modifier.fillMaxWidth().tap { Cfg.accent = i; Cfg.save() }.padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.size(22.dp).background(col))
-                Spacer(Modifier.width(10.dp))
-                Mono((if (Cfg.accent == i) "> " else "  ") + THEMES[i].first, col, 15)
-            }
-        }
-        item {
-            Column {
-                Spacer(Modifier.height(14.dp))
-                Mono("FONT STYLE (20)", DG, 12)
-            }
-        }
-        items(FONTS.size) { i ->
-            Text(
-                (if (Cfg.font == i) "> " else "  ") + FONTS[i].first + "  Abc 123",
-                color = G, fontFamily = FONTS[i].second, fontSize = 17.sp,
-                modifier = Modifier.fillMaxWidth().tap { Cfg.font = i; Cfg.save() }.padding(vertical = 8.dp)
-            )
-        }
-        item { Spacer(Modifier.height(30.dp)) }
+@Composable
+fun PageLock() = PageFrame("LOCK SCREEN & PASSCODE") {
+    val c = LocalContext.current
+    var newPin by remember { mutableStateOf("") }
+    Toggle("Home par double tap = lock", Cfg.dtLock) { Cfg.dtLock = !Cfg.dtLock; Cfg.save() }
+    Toggle("Lock par double tap = unlock (bina passcode)", Cfg.dtUnlock) { Cfg.dtUnlock = !Cfg.dtUnlock; Cfg.save() }
+    Toggle("Power button dabane par hamara lock dikhao (system lock ke upar)", Cfg.overLock) {
+        Cfg.overLock = !Cfg.overLock; Cfg.save(); winApply()
     }
+    Mono("Tip: phone ka Screen lock None ya Swipe rakho. PIN/fingerprint ho to hamare lock ke baad Android khud PIN maangega.", DG, 11)
+    Spacer(Modifier.height(10.dp))
+    Tile("PHONE LOCK SCREEN SETTINGS", Modifier.fillMaxWidth(), 12, 13) {
+        runCatching { c.startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS)) }
+    }
+    Spacer(Modifier.height(16.dp))
+    Mono("NAYA PASSCODE (min 3 akshar)", DG, 12)
+    Spacer(Modifier.height(6.dp))
+    BasicTextField(
+        value = newPin, onValueChange = { newPin = it }, singleLine = true,
+        textStyle = TextStyle(color = G, fontFamily = FF, fontSize = 18.sp),
+        cursorBrush = SolidColor(G),
+        modifier = Modifier.fillMaxWidth().border(1.dp, DG).padding(10.dp)
+    )
+    Spacer(Modifier.height(8.dp))
+    Tile("SAVE PASSCODE", Modifier.fillMaxWidth(), 12, 13) {
+        if (newPin.length >= 3) { Cfg.passcode = newPin; Cfg.save(); newPin = "" }
+    }
+}
+
+@Composable
+fun PageLauncher() = PageFrame("LAUNCHER") {
+    val c = LocalContext.current
+    val roleL = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
+    Tile("SET AS DEFAULT HOME APP", Modifier.fillMaxWidth(), 12, 13) { requestHomeRole(c, roleL) }
+    Spacer(Modifier.height(8.dp))
+    Tile("HOME APP SETTINGS (phone)", Modifier.fillMaxWidth(), 12, 13) {
+        runCatching { c.startActivity(Intent(Settings.ACTION_HOME_SETTINGS)) }
+    }
+    Spacer(Modifier.height(14.dp))
+    Toggle("Phone ka status bar chhupao (sirf hamara dikhe)", Cfg.hideBar) {
+        Cfg.hideBar = !Cfg.hideBar; Cfg.save(); winApply()
+    }
+    Toggle("Radar home par dikhao", Cfg.radarOn) { Cfg.radarOn = !Cfg.radarOn; Cfg.save() }
+    Mono("Moto launcher system app hai, hat nahi sakta. Hamara app default Home ban jaye to wo side ho jata hai.", DG, 11)
 }
 
 // ---------- wifi detail ----------
