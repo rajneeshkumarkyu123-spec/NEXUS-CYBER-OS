@@ -228,7 +228,7 @@ object Cfg {
     var lite by mutableStateOf(false)
     var wMaster by mutableStateOf(true)
     var wAnim by mutableStateOf(true)
-    var wVoice by mutableStateOf(true)
+    var wVoice by mutableStateOf(false)
     var wSfx by mutableStateOf(true)
     var wSilent by mutableStateOf(false)
     var wMsg by mutableStateOf("Rajneesh, unlock your phone.")
@@ -281,7 +281,7 @@ object Cfg {
         lite = sp.getBoolean("lite", false)
         wMaster = sp.getBoolean("wMaster", true)
         wAnim = sp.getBoolean("wAnim", true)
-        wVoice = sp.getBoolean("wVoice", true)
+        wVoice = sp.getBoolean("wVoice", false)
         wSfx = sp.getBoolean("wSfx", true)
         wSilent = sp.getBoolean("wSilent", false)
         wMsg = sp.getString("wMsg", "Rajneesh, unlock your phone.") ?: "Rajneesh, unlock your phone."
@@ -289,7 +289,7 @@ object Cfg {
         wRate = sp.getFloat("wRate", 0.9f)
         wPitch = sp.getFloat("wPitch", 0.55f)
         wVol = sp.getFloat("wVol", 1f)
-        wStyle = sp.getInt("wStyle", 0).coerceIn(0, 4)
+        wStyle = sp.getInt("wStyle", 0).coerceIn(0, 6)
         wDur = sp.getInt("wDur", 2800).coerceIn(1000, 6000)
         wColor = sp.getInt("wColor", -1)
         wInt = sp.getFloat("wInt", 0.8f)
@@ -522,6 +522,24 @@ fun DrawScope.drawScan(style: Int, col: Color, p: Float, k: Float, t: Int) {
                     drawContext.canvas.nativeCanvas.drawText(if ((i + j + t / 2) % 2 == 0) "1" else "0", x, y, wPaint)
                 }
             }
+        }
+        5 -> {
+            fingerArcs(col, a * p.coerceIn(0f, 1f), rad)
+            val n = 70
+            for (i in 0 until n) {
+                val ang = i * 2.399963f
+                val far = rad * (1.4f - 0.9f * p) * (0.4f + 0.6f * ((i * 37) % 100) / 100f)
+                drawCircle(
+                    col.copy(alpha = (0.3f + 0.7f * k).coerceIn(0f, 1f)), 2f + 2f * k,
+                    Offset(c0.x + cos(ang) * far, c0.y + sin(ang) * far)
+                )
+            }
+        }
+        6 -> {
+            val ph = (p * 3f) % 1f
+            drawCircle(col.copy(alpha = ((1f - ph) * 0.5f * (0.4f + k)).coerceIn(0f, 1f)), rad * (0.3f + 0.7f * ph), c0, style = Stroke(3f))
+            drawCircle(col.copy(alpha = a), rad * 0.18f, c0)
+            fingerArcs(col, a * 0.5f, rad * 0.45f)
         }
         else -> {
             val cy = Color(0xFF00E5FF)
@@ -2286,7 +2304,7 @@ fun PageWelcome() {
         Spacer(Modifier.height(14.dp))
         Mono("ANIMATION STYLE", DG, 12)
         Spacer(Modifier.height(6.dp))
-        listOf("NEON GREEN SCANNER", "BLUE HOLOGRAPHIC", "CIRCULAR RADAR", "MATRIX SCAN", "CYBERPUNK HUD").forEachIndexed { i, n ->
+        listOf("NEON GREEN SCANNER", "BLUE HOLOGRAPHIC", "CIRCULAR RADAR", "MATRIX SCAN", "CYBERPUNK HUD", "DIGITAL PARTICLE SCAN", "MINIMAL PULSE").forEachIndexed { i, n ->
             Tile(if (Cfg.wStyle == i) "[x] $n" else n, Modifier.fillMaxWidth(), 12, 13) { Cfg.wStyle = i; Cfg.save() }
             Spacer(Modifier.height(6.dp))
         }
