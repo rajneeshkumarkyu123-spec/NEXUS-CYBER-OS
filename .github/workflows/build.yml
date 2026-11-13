@@ -7,6 +7,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Keep newest copy of duplicated files
+        shell: bash
+        run: |
+          dedupe() {
+            ( cd "$1" || exit 0
+              best=0; newest=""
+              for f in "$2"*."$3"; do
+                [ -f "$f" ] || continue
+                t=$(git log -1 --format=%ct -- "$f")
+                t=${t:-0}
+                if [ "$t" -ge "$best" ]; then best=$t; newest="$f"; fi
+              done
+              [ -n "$newest" ] || exit 0
+              for f in "$2"*."$3"; do
+                [ -f "$f" ] || continue
+                [ "$f" = "$newest" ] || rm -f -- "$f"
+              done
+              [ "$newest" = "$2.$3" ] || mv -- "$newest" "$2.$3"
+            )
+          }
+          dedupe app/src/main/java/com/nexus/cyberos MainActivity kt
+          dedupe app/src/main AndroidManifest xml
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
