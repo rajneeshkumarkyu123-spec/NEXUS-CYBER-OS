@@ -28,6 +28,7 @@ import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.ConnectivityManager
@@ -44,6 +45,8 @@ import android.os.Environment
 import android.os.IBinder
 import android.os.StatFs
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.LruCache
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -52,6 +55,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -120,6 +124,7 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.nativeCanvas
@@ -146,10 +151,12 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetAddress
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -219,6 +226,20 @@ object Cfg {
     var powerLock by mutableStateOf(false)
     var autoFinger by mutableStateOf(true)
     var lite by mutableStateOf(false)
+    var wMaster by mutableStateOf(true)
+    var wAnim by mutableStateOf(true)
+    var wVoice by mutableStateOf(true)
+    var wSfx by mutableStateOf(true)
+    var wSilent by mutableStateOf(false)
+    var wMsg by mutableStateOf("Rajneesh, unlock your phone.")
+    var wVoiceName by mutableStateOf("")
+    var wRate by mutableStateOf(0.9f)
+    var wPitch by mutableStateOf(0.55f)
+    var wVol by mutableStateOf(1f)
+    var wStyle by mutableStateOf(0)
+    var wDur by mutableStateOf(2800)
+    var wColor by mutableStateOf(-1)
+    var wInt by mutableStateOf(0.8f)
     var radarOn by mutableStateOf(true)
     var showWifi by mutableStateOf(true)
     var showBt by mutableStateOf(true)
@@ -238,7 +259,12 @@ object Cfg {
         for (i in l.indices) l[i] = p.getOrElse(i) { "" }
     }
 
+    private var ready = false
+
+    fun ensure(c: Context) { if (!ready) init(c) }
+
     fun init(c: Context) {
+        ready = true
         sp = c.getSharedPreferences("nexus2", Context.MODE_PRIVATE)
         accent = sp.getInt("accent", 0).coerceIn(0, THEMES.size - 1)
         font = sp.getInt("font", 0).coerceIn(0, FONTS.size - 1)
@@ -253,6 +279,20 @@ object Cfg {
         powerLock = sp.getBoolean("powerLock", false)
         autoFinger = sp.getBoolean("autoFinger", true)
         lite = sp.getBoolean("lite", false)
+        wMaster = sp.getBoolean("wMaster", true)
+        wAnim = sp.getBoolean("wAnim", true)
+        wVoice = sp.getBoolean("wVoice", true)
+        wSfx = sp.getBoolean("wSfx", true)
+        wSilent = sp.getBoolean("wSilent", false)
+        wMsg = sp.getString("wMsg", "Rajneesh, unlock your phone.") ?: "Rajneesh, unlock your phone."
+        wVoiceName = sp.getString("wVoiceName", "") ?: ""
+        wRate = sp.getFloat("wRate", 0.9f)
+        wPitch = sp.getFloat("wPitch", 0.55f)
+        wVol = sp.getFloat("wVol", 1f)
+        wStyle = sp.getInt("wStyle", 0).coerceIn(0, 4)
+        wDur = sp.getInt("wDur", 2800).coerceIn(1000, 6000)
+        wColor = sp.getInt("wColor", -1)
+        wInt = sp.getFloat("wInt", 0.8f)
         radarOn = sp.getBoolean("radarOn", true)
         showWifi = sp.getBoolean("showWifi", true)
         showBt = sp.getBoolean("showBt", true)
@@ -288,6 +328,11 @@ object Cfg {
             .putBoolean("labels", labels).putBoolean("hideBar", hideBar).putBoolean("overLock", overLock)
             .putBoolean("powerLock", powerLock).putBoolean("autoFinger", autoFinger).putBoolean("lite", lite)
             .putBoolean("radarOn", radarOn)
+            .putBoolean("wMaster", wMaster).putBoolean("wAnim", wAnim).putBoolean("wVoice", wVoice)
+            .putBoolean("wSfx", wSfx).putBoolean("wSilent", wSilent)
+            .putString("wMsg", wMsg).putString("wVoiceName", wVoiceName)
+            .putFloat("wRate", wRate).putFloat("wPitch", wPitch).putFloat("wVol", wVol).putFloat("wInt", wInt)
+            .putInt("wStyle", wStyle).putInt("wDur", wDur).putInt("wColor", wColor)
             .putBoolean("showWifi", showWifi).putBoolean("showBt", showBt)
             .putBoolean("dtLock", dtLock).putBoolean("dtUnlock", dtUnlock).putBoolean("askedHome", askedHome)
             .putString("passcode", passcode).putString("ans1", ans1).putString("ans2", ans2)
@@ -361,11 +406,187 @@ fun Modifier.tap(on: () -> Unit): Modifier = composed {
     }
 }
 
+// ---------- unlock welcome (animation + voice) ----------
+object Welcome {
+    var show by mutableStateOf(false)
+    var seq by mutableStateOf(0)
+    private var lastTs = 0L
+
+    fun trigger(c: Context, force: Boolean = false) {
+        Cfg.ensure(c.applicationContext)
+        if (!Cfg.wMaster) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastTs < 10_000L) return
+        val am = c.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val m = am.mode
+        if (m == AudioManager.MODE_IN_CALL || m == AudioManager.MODE_IN_COMMUNICATION || m == AudioManager.MODE_RINGTONE) return
+        lastTs = now
+        if (Cfg.wAnim) { show = true; seq += 1 }
+        val quiet = Cfg.wSilent || am.ringerMode != AudioManager.RINGER_MODE_NORMAL
+        if (!quiet) {
+            if (Cfg.wSfx) Snd.ok()
+            if (Cfg.wVoice) speak(c)
+        }
+    }
+
+    private fun speak(c: Context) {
+        val app = c.applicationContext
+        val msg = Cfg.wMsg.ifBlank { "Rajneesh, unlock your phone." }
+        var t: TextToSpeech? = null
+        t = TextToSpeech(app) { st ->
+            val e = t
+            if (st == TextToSpeech.SUCCESS && e != null) {
+                runCatching {
+                    e.language = Locale.US
+                    if (Cfg.wVoiceName.isNotEmpty()) {
+                        e.voices?.firstOrNull { it.name == Cfg.wVoiceName }?.let { v -> e.voice = v }
+                    }
+                    e.setSpeechRate(Cfg.wRate)
+                    e.setPitch(Cfg.wPitch)
+                    e.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    e.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) { e.shutdown() }
+                        @Suppress("OVERRIDE_DEPRECATION")
+                        override fun onError(utteranceId: String?) { e.shutdown() }
+                    })
+                    val b = Bundle()
+                    b.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, Cfg.wVol)
+                    e.speak(msg, TextToSpeech.QUEUE_FLUSH, b, "nexus_welcome")
+                }
+            } else {
+                e?.shutdown()
+            }
+        }
+    }
+}
+
+private val wPaint = android.graphics.Paint().apply { textSize = 20f; typeface = Typeface.MONOSPACE }
+
+fun DrawScope.fingerArcs(col: Color, a: Float, r: Float) {
+    val c0 = center
+    for (i in 1..6) {
+        val rr = r * (0.18f + i * 0.13f)
+        drawArc(
+            col.copy(alpha = a.coerceIn(0f, 1f)), 200f + i * 12f, 250f - i * 8f, false,
+            Offset(c0.x - rr, c0.y - rr), Size(2 * rr, 2 * rr), style = Stroke(3f)
+        )
+    }
+}
+
+fun DrawScope.drawScan(style: Int, col: Color, p: Float, k: Float, t: Int) {
+    val c0 = center
+    val rad = size.minDimension / 2f
+    val a = 0.35f + 0.65f * k
+    when (style) {
+        0 -> {
+            drawCircle(col.copy(alpha = 0.10f * k), rad, c0)
+            fingerArcs(col, a, rad)
+            val y = size.height * (if (p < 0.5f) p * 2f else 2f - p * 2f)
+            drawLine(col.copy(alpha = 0.25f * k), Offset(0f, y), Offset(size.width, y), 26f)
+            drawLine(col, Offset(0f, y), Offset(size.width, y), 3f + 5f * k)
+        }
+        1 -> {
+            fingerArcs(col, a * (0.7f + 0.3f * sin(t * 0.7f)), rad)
+            var y = 0f
+            while (y < size.height) {
+                drawLine(col.copy(alpha = 0.10f + 0.12f * k), Offset(0f, y), Offset(size.width, y), 1.5f)
+                y += 8f
+            }
+            drawCircle(col.copy(alpha = 0.18f * k), rad * (0.2f + 0.8f * p), c0)
+            drawCircle(col, rad * (0.2f + 0.8f * p), c0, style = Stroke(2f))
+        }
+        2 -> {
+            for (f in listOf(0.33f, 0.66f, 1f)) drawCircle(col.copy(alpha = 0.5f), rad * f, c0, style = Stroke(2f))
+            drawLine(col.copy(alpha = 0.4f), Offset(c0.x - rad, c0.y), Offset(c0.x + rad, c0.y), 1.5f)
+            drawLine(col.copy(alpha = 0.4f), Offset(c0.x, c0.y - rad), Offset(c0.x, c0.y + rad), 1.5f)
+            rotate(p * 720f, c0) { drawLine(col, c0, Offset(c0.x + rad, c0.y), 3f + 4f * k) }
+            fingerArcs(col, a * 0.6f, rad * 0.5f)
+        }
+        3 -> {
+            fingerArcs(col, a, rad)
+            wPaint.color = col.toArgb()
+            val n = 12
+            for (i in 0 until n) {
+                val x = size.width * (i + 0.5f) / n
+                val y0 = (t * (4f + (i * 7) % 5) + i * 53f) % (size.height + 100f)
+                for (j in 0 until 6) {
+                    val y = y0 - j * 22f
+                    if (y < 0f || y > size.height) continue
+                    wPaint.alpha = ((200 - j * 30) * k).toInt().coerceIn(10, 255)
+                    drawContext.canvas.nativeCanvas.drawText(if ((i + j + t / 2) % 2 == 0) "1" else "0", x, y, wPaint)
+                }
+            }
+        }
+        else -> {
+            val cy = Color(0xFF00E5FF)
+            fingerArcs(col, a, rad * 0.85f)
+            fingerArcs(cy, a * 0.5f, rad * 0.6f)
+            val b = rad * 0.28f
+            val s = size.width
+            val sw = 5f
+            drawLine(col, Offset(0f, 0f), Offset(b, 0f), sw)
+            drawLine(col, Offset(0f, 0f), Offset(0f, b), sw)
+            drawLine(col, Offset(s, 0f), Offset(s - b, 0f), sw)
+            drawLine(col, Offset(s, 0f), Offset(s, b), sw)
+            drawLine(col, Offset(0f, s), Offset(b, s), sw)
+            drawLine(col, Offset(0f, s), Offset(0f, s - b), sw)
+            drawLine(col, Offset(s, s), Offset(s - b, s), sw)
+            drawLine(col, Offset(s, s), Offset(s, s - b), sw)
+            drawRect(col.copy(alpha = 0.25f), Offset(0f, s - 14f), Size(s, 8f))
+            drawRect(col, Offset(0f, s - 14f), Size(s * p, 8f))
+            wPaint.color = col.toArgb()
+            wPaint.alpha = 220
+            drawContext.canvas.nativeCanvas.drawText(
+                "SCAN ${(p * 100).toInt()}%  0x" + Integer.toHexString((t * 2654435) and 0xFFFFFF).uppercase(), 8f, 24f, wPaint
+            )
+        }
+    }
+}
+
+@Composable
+fun WelcomeOverlay() {
+    if (!Welcome.show) return
+    val prog = remember { Animatable(0f) }
+    LaunchedEffect(Welcome.seq) {
+        prog.snapTo(0f)
+        withTimeoutOrNull(Cfg.wDur + 12000L) { prog.animateTo(1f, tween(Cfg.wDur, easing = LinearEasing)) }
+        Welcome.show = false
+    }
+    val style = Cfg.wStyle
+    val col = if (Cfg.wColor in THEMES.indices) Color(THEMES[Cfg.wColor].second) else when (style) {
+        1 -> Color(0xFF40C4FF)
+        4 -> Color(0xFFFF2BD6)
+        else -> Color(0xFF00FF41)
+    }
+    val msg = Cfg.wMsg.ifBlank { "Rajneesh, unlock your phone." }
+    Box(
+        Modifier.fillMaxSize().background(Color(0xE6000000))
+            .pointerInput(Unit) { detectTapGestures(onTap = { Welcome.show = false }) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Canvas(Modifier.size(240.dp)) { drawScan(style, col, prog.value, Cfg.wInt, tick) }
+            Spacer(Modifier.height(16.dp))
+            Mono("NEXUS ACCESS GRANTED", col, 18)
+            Spacer(Modifier.height(6.dp))
+            Mono(msg, col, 15)
+        }
+    }
+}
+
 // ---------- service (power button) + boot ----------
 class LockService : Service() {
     private val rcv = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, i: Intent) {
-            if (i.action == Intent.ACTION_SCREEN_OFF) {
+            if (i.action == Intent.ACTION_USER_PRESENT) {
+                Welcome.trigger(ctx)
+            } else if (i.action == Intent.ACTION_SCREEN_OFF) {
                 if (screenState != "aod") screenState = "lock"
                 panelOpen = false
             } else if (i.action == Intent.ACTION_SCREEN_ON) {
@@ -399,6 +620,7 @@ class LockService : Service() {
         val f = IntentFilter()
         f.addAction(Intent.ACTION_SCREEN_OFF)
         f.addAction(Intent.ACTION_SCREEN_ON)
+        f.addAction(Intent.ACTION_USER_PRESENT)
         ContextCompat.registerReceiver(this, rcv, f, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
@@ -427,6 +649,12 @@ class MainActivity : ComponentActivity() {
     private val off = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (screenState != "aod") { screenState = "lock"; panelOpen = false }
+        }
+    }
+
+    private val present = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Welcome.trigger(applicationContext)
         }
     }
 
@@ -470,6 +698,7 @@ class MainActivity : ComponentActivity() {
         applyWindow()
         if (Cfg.powerLock) setService(this, true)
         ContextCompat.registerReceiver(this, off, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, present, IntentFilter(Intent.ACTION_USER_PRESENT), ContextCompat.RECEIVER_NOT_EXPORTED)
         setContent { NexusApp() }
     }
 
@@ -501,6 +730,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(off) }
+        runCatching { unregisterReceiver(present) }
         super.onDestroy()
     }
 }
@@ -549,12 +779,13 @@ fun proceedUnlock(act: ComponentActivity) {
     val km = act.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
     if (km.isKeyguardLocked) {
         km.requestDismissKeyguard(act, object : KeyguardManager.KeyguardDismissCallback() {
-            override fun onDismissSucceeded() { screenState = "home" }
+            override fun onDismissSucceeded() { screenState = "home"; Welcome.trigger(act) }
             override fun onDismissError() { Snd.err() }
             override fun onDismissCancelled() { Snd.err() }
         })
     } else {
         screenState = "home"
+        Welcome.trigger(act)
     }
 }
 
@@ -1029,6 +1260,7 @@ fun NexusApp() {
         }
         if (panelOpen && s != "lock" && s != "aod") ControlPanel()
         if (!booted) BootSplash()
+        WelcomeOverlay()
     }
 }
 
@@ -1640,6 +1872,7 @@ fun SettingsScreen() {
         "folders" -> PageFolders()
         "widgets" -> PageWidgets()
         "lock" -> PageLock()
+        "welcome" -> PageWelcome()
         "launcher" -> PageLauncher()
         else -> SettingsMain()
     }
@@ -1658,6 +1891,7 @@ fun SettingsMain() {
         "folders" to "[+] FOLDERS",
         "widgets" to "[+] WIDGETS",
         "lock" to "[+] LOCK, FINGERPRINT, RESET",
+        "welcome" to "[+] UNLOCK WELCOME (animation + voice)",
         "launcher" to "[+] LAUNCHER"
     )
     Column(Modifier.fillMaxSize().padding(14.dp).verticalScroll(rememberScrollState())) {
@@ -1992,6 +2226,102 @@ fun PageLock() {
             }
         }
         if (info.isNotEmpty()) Mono(info, PK, 12, Modifier.padding(top = 8.dp))
+    }
+}
+
+@Composable
+fun NumSlider(name: String, v: Float, lo: Float, hi: Float, shown: String, on: (Float) -> Unit, fin: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Mono("$name $shown", G, 12, Modifier.width(120.dp))
+        Slider(
+            value = v.coerceIn(lo, hi), onValueChange = on, valueRange = lo..hi,
+            onValueChangeFinished = fin, modifier = Modifier.weight(1f),
+            colors = SliderDefaults.colors(thumbColor = G, activeTrackColor = G, inactiveTrackColor = DG)
+        )
+    }
+}
+
+@Composable
+fun PageWelcome() {
+    val c = LocalContext.current
+    var msg by remember { mutableStateOf(Cfg.wMsg) }
+    val voices by produceState(listOf<Pair<String, String>>()) {
+        val ch = CompletableDeferred<List<Pair<String, String>>>()
+        var t: TextToSpeech? = null
+        t = TextToSpeech(c.applicationContext) { st ->
+            val l = if (st == TextToSpeech.SUCCESS) {
+                runCatching {
+                    t?.voices?.filter { !it.isNetworkConnectionRequired }
+                        ?.sortedBy { it.name }?.take(40)
+                        ?.map { it.name to (it.locale.toString() + "  " + it.name) } ?: emptyList()
+                }.getOrDefault(emptyList())
+            } else emptyList()
+            ch.complete(l)
+        }
+        value = ch.await()
+        t?.shutdown()
+    }
+    PageFrame("UNLOCK WELCOME") {
+        Toggle("MASTER (sab on/off)", Cfg.wMaster) { Cfg.wMaster = !Cfg.wMaster; Cfg.save() }
+        Toggle("Fingerprint animation", Cfg.wAnim) { Cfg.wAnim = !Cfg.wAnim; Cfg.save() }
+        Toggle("Voice welcome", Cfg.wVoice) { Cfg.wVoice = !Cfg.wVoice; Cfg.save() }
+        Toggle("Sound effects", Cfg.wSfx) { Cfg.wSfx = !Cfg.wSfx; Cfg.save() }
+        Toggle("Silent mode (voice + sound band)", Cfg.wSilent) { Cfg.wSilent = !Cfg.wSilent; Cfg.save() }
+        Mono("Phone silent/vibrate ho ya call chal rahi ho to awaaz apne aap band rehti hai. 10 second me ek hi baar chalta hai.", DG, 11)
+        Spacer(Modifier.height(10.dp))
+        Tile("TEST NOW", Modifier.fillMaxWidth(), 14, 14) { Welcome.trigger(c, true) }
+        Spacer(Modifier.height(14.dp))
+        Mono("WELCOME MESSAGE", DG, 12)
+        Field(msg, { msg = it }, "welcome message")
+        Spacer(Modifier.height(6.dp))
+        Tile("SAVE MESSAGE", Modifier.fillMaxWidth(), 12, 13) {
+            Cfg.wMsg = msg.trim().ifEmpty { "Rajneesh, unlock your phone." }; Cfg.save()
+        }
+        Spacer(Modifier.height(14.dp))
+        NumSlider("SPEED", Cfg.wRate, 0.5f, 2f, "%.1fx".format(Cfg.wRate), { Cfg.wRate = it }) { Cfg.save() }
+        NumSlider("ROBOT PITCH", Cfg.wPitch, 0.3f, 1.5f, "%.1f".format(Cfg.wPitch), { Cfg.wPitch = it }) { Cfg.save() }
+        NumSlider("VOICE VOL", Cfg.wVol, 0.1f, 1f, "%.1f".format(Cfg.wVol), { Cfg.wVol = it }) { Cfg.save() }
+        NumSlider("ANIM TIME", Cfg.wDur.toFloat(), 1000f, 6000f, "${Cfg.wDur}ms", { Cfg.wDur = it.toInt() }) { Cfg.save() }
+        NumSlider("INTENSITY", Cfg.wInt, 0.2f, 1f, "%.1f".format(Cfg.wInt), { Cfg.wInt = it }) { Cfg.save() }
+        Spacer(Modifier.height(14.dp))
+        Mono("ANIMATION STYLE", DG, 12)
+        Spacer(Modifier.height(6.dp))
+        listOf("NEON GREEN SCANNER", "BLUE HOLOGRAPHIC", "CIRCULAR RADAR", "MATRIX SCAN", "CYBERPUNK HUD").forEachIndexed { i, n ->
+            Tile(if (Cfg.wStyle == i) "[x] $n" else n, Modifier.fillMaxWidth(), 12, 13) { Cfg.wStyle = i; Cfg.save() }
+            Spacer(Modifier.height(6.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+        Mono("ANIMATION COLOR", DG, 12)
+        Spacer(Modifier.height(6.dp))
+        Tile(if (Cfg.wColor == -1) "[x] AUTO (style ka apna)" else "AUTO (style ka apna)", Modifier.fillMaxWidth(), 10, 12) {
+            Cfg.wColor = -1; Cfg.save()
+        }
+        Spacer(Modifier.height(8.dp))
+        THEMES.indices.chunked(5).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { i ->
+                    Box(
+                        Modifier.weight(1f).height(36.dp).background(Color(THEMES[i].second))
+                            .border(3.dp, if (Cfg.wColor == i) Color.White else Color.Transparent)
+                            .tap { Cfg.wColor = i; Cfg.save() }
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(10.dp))
+        Mono("VOICE (offline voices)", DG, 12)
+        Mono(
+            if (Cfg.wVoiceName.isEmpty()) "[x] DEFAULT" else "DEFAULT", G, 14,
+            Modifier.fillMaxWidth().tap { Cfg.wVoiceName = ""; Cfg.save() }.padding(vertical = 8.dp)
+        )
+        voices.forEach { (n, label) ->
+            Mono(
+                if (Cfg.wVoiceName == n) "[x] $label" else label, G, 13,
+                Modifier.fillMaxWidth().tap { Cfg.wVoiceName = n; Cfg.save() }.padding(vertical = 8.dp)
+            )
+        }
+        if (voices.isEmpty()) Mono("(offline voice nahi mili - phone ka Text-to-speech engine check karo)", DG, 11)
     }
 }
 
